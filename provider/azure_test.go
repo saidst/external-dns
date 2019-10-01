@@ -34,7 +34,7 @@ import (
 )
 
 type mockZonesClient struct {
-	mockZonesClientIterator *dns.ZoneListResultIterator
+	mockZonesClientZoneList []Zone
 }
 
 type mockRecordSetsClient struct {
@@ -50,8 +50,8 @@ func createMockZone(zone string, id string) dns.Zone {
 	}
 }
 
-func (client *mockZonesClient) ListByResourceGroupComplete(ctx context.Context, resourceGroupName string, top *int32) (result dns.ZoneListResultIterator, err error) {
-	return *client.mockZonesClientIterator, nil
+func (client *mockZonesClient) ListByResourceGroupComplete(ctx context.Context, resourceGroupName string) ([]Zone, error) {
+	return client.mockZonesClientZoneList, nil
 }
 
 func aRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
@@ -152,14 +152,14 @@ func (client *mockRecordSetsClient) CreateOrUpdate(ctx context.Context, resource
 	return parameters, nil
 }
 
-func newAzureProvider(domainFilter DomainFilter, zoneIDFilter ZoneIDFilter, dryRun bool, resourceGroup string, zonesClient ZonesClient, recordsClient RecordSetsClient) *AzureProvider {
+func newAzureProvider(domainFilter DomainFilter, zoneIDFilter ZoneIDFilter, dryRun bool, resourceGroup string, zonesClient ZonesClient, recordsClient PublicRecordSetsClient) *AzureProvider {
 	return &AzureProvider{
-		domainFilter:     domainFilter,
-		zoneIDFilter:     zoneIDFilter,
-		dryRun:           dryRun,
-		resourceGroup:    resourceGroup,
-		zonesClient:      zonesClient,
-		recordSetsClient: recordsClient,
+		domainFilter:           domainFilter,
+		zoneIDFilter:           zoneIDFilter,
+		dryRun:                 dryRun,
+		resourceGroup:          resourceGroup,
+		publicZonesClient:      zonesClient,
+		publicRecordSetsClient: recordsClient,
 	}
 }
 
@@ -168,29 +168,14 @@ func validateAzureEndpoints(t *testing.T, endpoints []*endpoint.Endpoint, expect
 }
 
 func TestAzureRecord(t *testing.T) {
-	zlr := dns.ZoneListResult{
-		Value: &[]dns.Zone{
-			createMockZone("example.com", "/dnszones/example.com"),
-		},
-	}
-	results := []dns.ZoneListResult{
-		zlr,
-	}
-
-
-	mockZoneListResultPage := dns.NewZoneListResultPage(func(ctxParam context.Context, zlrParam dns.ZoneListResult) (dns.ZoneListResult, error) {
-		if len(results) > 0 {
-			result := results[0]
-			results = nil
-			return result, nil
-		} else {
-			return dns.ZoneListResult{}, nil
-		}
-	})
-	mockZoneClientIterator := dns.NewZoneListResultIterator(mockZoneListResultPage)
-
 	zonesClient := mockZonesClient{
-		mockZonesClientIterator: &mockZoneClientIterator,
+		mockZonesClientZoneList: []Zone{
+			{
+				Name: "example.com",
+				Id:   "/dnszones/example.com",
+				Type: "public",
+			},
+		},
 	}
 
 	rslr := dns.RecordSetListResult{
@@ -244,34 +229,17 @@ func TestAzureRecord(t *testing.T) {
 	fmt.Printf("Debugging azure test: %v", debug)
 
 	validateAzureEndpoints(t, actual, expected)
-
 }
 
-
 func TestAzureMultiRecord(t *testing.T) {
-
-	zlr := dns.ZoneListResult{
-		Value: &[]dns.Zone{
-			createMockZone("example.com", "/dnszones/example.com"),
-		},
-	}
-	results := []dns.ZoneListResult{
-		zlr,
-	}
-
-	mockZoneListResultPage := dns.NewZoneListResultPage(func(ctxParam context.Context, zlrParam dns.ZoneListResult) (dns.ZoneListResult, error) {
-		if len(results) > 0 {
-			result := results[0]
-			results = nil
-			return result, nil
-		} else {
-			return dns.ZoneListResult{}, nil
-		}
-	})
-	mockZoneClientIterator := dns.NewZoneListResultIterator(mockZoneListResultPage)
-
 	zonesClient := mockZonesClient{
-		mockZonesClientIterator: &mockZoneClientIterator,
+		mockZonesClientZoneList: []Zone{
+			{
+				Name: "example.com",
+				Id:   "/dnszones/example.com",
+				Type: "public",
+			},
+		},
 	}
 
 	rslr := dns.RecordSetListResult{
@@ -361,31 +329,20 @@ func TestAzureApplyChangesDryRun(t *testing.T) {
 	validateAzureEndpoints(t, recordsClient.updatedEndpoints, []*endpoint.Endpoint{})
 }
 
-func testAzureApplyChangesInternal(t *testing.T, dryRun bool, client RecordSetsClient) {
-	zlr := dns.ZoneListResult{
-		Value: &[]dns.Zone{
-			createMockZone("example.com", "/dnszones/example.com"),
-			createMockZone("other.com", "/dnszones/other.com"),
-		},
-	}
-
-	results := []dns.ZoneListResult{
-		zlr,
-	}
-
-	mockZoneListResultPage := dns.NewZoneListResultPage(func(ctxParam context.Context, zlrParam dns.ZoneListResult) (dns.ZoneListResult, error) {
-		if len(results) > 0 {
-			result := results[0]
-			results = nil
-			return result, nil
-		} else {
-			return dns.ZoneListResult{}, nil
-		}
-	})
-	mockZoneClientIterator := dns.NewZoneListResultIterator(mockZoneListResultPage)
-
+func testAzureApplyChangesInternal(t *testing.T, dryRun bool, client PublicRecordSetsClient) {
 	zonesClient := mockZonesClient{
-		mockZonesClientIterator: &mockZoneClientIterator,
+		mockZonesClientZoneList: []Zone{
+			{
+				Name: "example.com",
+				Id:   "/dnszones/example.com",
+				Type: "public",
+			},
+			{
+				Name: "other.com",
+				Id:   "/dnszones/other.com",
+				Type: "public",
+			},
+		},
 	}
 
 	provider := newAzureProvider(
@@ -452,4 +409,18 @@ func TestAzureGetAccessToken(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected to fail, but got no error")
 	}
+}
+
+func TestAzureValidateRecordSet(t *testing.T) {
+	provider := newAzureProvider(NewDomainFilter([]string{"example.com"}), NewZoneIDFilter([]string{""}), true, "k8s", nil, nil)
+
+	recordSet := createMockRecordSet("bar", endpoint.RecordTypeA, "111.222.333.444")
+	actualEndpoint, err := provider.validateRecordSet("example.com", recordSet)
+	if err != nil {
+		t.Fatalf("error validating recordSet: %s", err.Error())
+	}
+
+	expectedEndpoint := endpoint.NewEndpoint("bar.example.com", endpoint.RecordTypeA, "111.222.333.444")
+
+	validateAzureEndpoints(t, []*endpoint.Endpoint{actualEndpoint}, []*endpoint.Endpoint{expectedEndpoint})
 }
