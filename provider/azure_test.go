@@ -34,13 +34,13 @@ import (
 )
 
 type mockZonesClient struct {
-	mockZonesClientZoneList []Zone
+	zones []Zone
 }
 
 type mockRecordSetsClient struct {
-	mockRecordSetListIterator *dns.RecordSetListResultIterator
-	deletedEndpoints          []*endpoint.Endpoint
-	updatedEndpoints          []*endpoint.Endpoint
+	recordSets       []RecordSet
+	deletedEndpoints []*endpoint.Endpoint
+	updatedEndpoints []*endpoint.Endpoint
 }
 
 func createMockZone(zone string, id string) dns.Zone {
@@ -51,10 +51,76 @@ func createMockZone(zone string, id string) dns.Zone {
 }
 
 func (client *mockZonesClient) ListByResourceGroupComplete(ctx context.Context, resourceGroupName string) ([]Zone, error) {
-	return client.mockZonesClientZoneList, nil
+	return client.zones, nil
 }
 
-func aRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
+func aRecordSetPropertiesGetter(values []string, ttl int64) *RecordSetProperties {
+	aRecords := make([]ARecord, len(values))
+	for i, value := range values {
+		aRecords[i] = ARecord{
+			Ipv4Address: to.StringPtr(value),
+		}
+	}
+	return &RecordSetProperties{
+		TTL:      to.Int64Ptr(ttl),
+		ARecords: &aRecords,
+	}
+}
+
+func cNameRecordSetPropertiesGetter(values []string, ttl int64) *RecordSetProperties {
+	return &RecordSetProperties{
+		TTL: to.Int64Ptr(ttl),
+		CnameRecord: &CnameRecord{
+			Cname: to.StringPtr(values[0]),
+		},
+	}
+}
+
+func txtRecordSetPropertiesGetter(values []string, ttl int64) *RecordSetProperties {
+	return &RecordSetProperties{
+		TTL: to.Int64Ptr(ttl),
+		TxtRecords: &[]TxtRecord{
+			{
+				Value: &[]string{values[0]},
+			},
+		},
+	}
+}
+
+func othersRecordSetPropertiesGetter(values []string, ttl int64) *RecordSetProperties {
+	return &RecordSetProperties{
+		TTL: to.Int64Ptr(ttl),
+	}
+}
+
+func createMockRecordSet(name, recordType string, values ...string) RecordSet {
+	return createMockRecordSetMultiWithTTL(name, recordType, 0, values...)
+}
+func createMockRecordSetWithTTL(name, recordType, value string, ttl int64) RecordSet {
+	return createMockRecordSetMultiWithTTL(name, recordType, ttl, value)
+}
+func createMockRecordSetMultiWithTTL(name, recordType string, ttl int64, values ...string) RecordSet {
+	var getterFunc func(values []string, ttl int64) *RecordSetProperties
+
+	switch recordType {
+	case endpoint.RecordTypeA:
+		getterFunc = aRecordSetPropertiesGetter
+	case endpoint.RecordTypeCNAME:
+		getterFunc = cNameRecordSetPropertiesGetter
+	case endpoint.RecordTypeTXT:
+		getterFunc = txtRecordSetPropertiesGetter
+	default:
+		getterFunc = othersRecordSetPropertiesGetter
+	}
+	return RecordSet{
+		Name:                to.StringPtr(name),
+		Type:                to.StringPtr("Microsoft.Network/dnszones/" + recordType),
+		RecordSetProperties: getterFunc(values, ttl),
+	}
+
+}
+
+func azureARecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
 	aRecords := make([]dns.ARecord, len(values))
 	for i, value := range values {
 		aRecords[i] = dns.ARecord{
@@ -67,7 +133,7 @@ func aRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProper
 	}
 }
 
-func cNameRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
+func azureCNameRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
 	return &dns.RecordSetProperties{
 		TTL: to.Int64Ptr(ttl),
 		CnameRecord: &dns.CnameRecord{
@@ -76,7 +142,7 @@ func cNameRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetPr
 	}
 }
 
-func txtRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
+func azureTxtRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
 	return &dns.RecordSetProperties{
 		TTL: to.Int64Ptr(ttl),
 		TxtRecords: &[]dns.TxtRecord{
@@ -87,29 +153,30 @@ func txtRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProp
 	}
 }
 
-func othersRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
+func azureOthersRecordSetPropertiesGetter(values []string, ttl int64) *dns.RecordSetProperties {
 	return &dns.RecordSetProperties{
 		TTL: to.Int64Ptr(ttl),
 	}
 }
-func createMockRecordSet(name, recordType string, values ...string) dns.RecordSet {
-	return createMockRecordSetMultiWithTTL(name, recordType, 0, values...)
+
+func createMockAzureRecordSet(name, recordType string, values ...string) dns.RecordSet {
+	return createMockAzureRecordSetMultiWithTTL(name, recordType, 0, values...)
 }
-func createMockRecordSetWithTTL(name, recordType, value string, ttl int64) dns.RecordSet {
-	return createMockRecordSetMultiWithTTL(name, recordType, ttl, value)
+func createMockAzureRecordSetWithTTL(name, recordType, value string, ttl int64) dns.RecordSet {
+	return createMockAzureRecordSetMultiWithTTL(name, recordType, ttl, value)
 }
-func createMockRecordSetMultiWithTTL(name, recordType string, ttl int64, values ...string) dns.RecordSet {
+func createMockAzureRecordSetMultiWithTTL(name, recordType string, ttl int64, values ...string) dns.RecordSet {
 	var getterFunc func(values []string, ttl int64) *dns.RecordSetProperties
 
 	switch recordType {
 	case endpoint.RecordTypeA:
-		getterFunc = aRecordSetPropertiesGetter
+		getterFunc = azureARecordSetPropertiesGetter
 	case endpoint.RecordTypeCNAME:
-		getterFunc = cNameRecordSetPropertiesGetter
+		getterFunc = azureCNameRecordSetPropertiesGetter
 	case endpoint.RecordTypeTXT:
-		getterFunc = txtRecordSetPropertiesGetter
+		getterFunc = azureTxtRecordSetPropertiesGetter
 	default:
-		getterFunc = othersRecordSetPropertiesGetter
+		getterFunc = azureOthersRecordSetPropertiesGetter
 	}
 	return dns.RecordSet{
 		Name:                to.StringPtr(name),
@@ -119,8 +186,8 @@ func createMockRecordSetMultiWithTTL(name, recordType string, ttl int64, values 
 
 }
 
-func (client *mockRecordSetsClient) ListAllByDNSZoneComplete(ctx context.Context, resourceGroupName string, zoneName string, top *int32, recordSetNameSuffix string) (result dns.RecordSetListResultIterator, err error) {
-	return *client.mockRecordSetListIterator, nil
+func (client *mockRecordSetsClient) GetRecordsByZoneName(ctx context.Context, resourceGroupName string, zoneName string) ([]RecordSet, error) {
+	return client.recordSets, nil
 }
 
 func (client *mockRecordSetsClient) Delete(ctx context.Context, resourceGroupName string, zoneName string, relativeRecordSetName string, recordType dns.RecordType, ifMatch string) (result autorest.Response, err error) {
@@ -146,20 +213,20 @@ func (client *mockRecordSetsClient) CreateOrUpdate(ctx context.Context, resource
 			formatAzureDNSName(relativeRecordSetName, zoneName),
 			string(recordType),
 			ttl,
-			extractAzureTargets(&parameters)...,
+			extractAzureTargetsFromAzureRecordSet(&parameters)...,
 		),
 	)
 	return parameters, nil
 }
 
-func newAzureProvider(domainFilter DomainFilter, zoneIDFilter ZoneIDFilter, dryRun bool, resourceGroup string, zonesClient ZonesClient, recordsClient PublicRecordSetsClient) *AzureProvider {
+func newAzureProvider(domainFilter DomainFilter, zoneIDFilter ZoneIDFilter, dryRun bool, resourceGroup string, zonesClient ZonesClient, recordSetsClient RecordSetsClient) *AzureProvider {
 	return &AzureProvider{
 		domainFilter:           domainFilter,
 		zoneIDFilter:           zoneIDFilter,
 		dryRun:                 dryRun,
 		resourceGroup:          resourceGroup,
 		publicZonesClient:      zonesClient,
-		publicRecordSetsClient: recordsClient,
+		publicRecordSetsClient: recordSetsClient,
 	}
 }
 
@@ -169,7 +236,7 @@ func validateAzureEndpoints(t *testing.T, endpoints []*endpoint.Endpoint, expect
 
 func TestAzureRecord(t *testing.T) {
 	zonesClient := mockZonesClient{
-		mockZonesClientZoneList: []Zone{
+		zones: []Zone{
 			{
 				Name: "example.com",
 				Id:   "/dnszones/example.com",
@@ -178,8 +245,8 @@ func TestAzureRecord(t *testing.T) {
 		},
 	}
 
-	rslr := dns.RecordSetListResult{
-		Value: &[]dns.RecordSet{
+	recordSetsClient := mockRecordSetsClient{
+		recordSets: []RecordSet{
 			createMockRecordSet("@", "NS", "ns1-03.azure-dns.com."),
 			createMockRecordSet("@", "SOA", "Email: azuredns-hostmaster.microsoft.com"),
 			createMockRecordSet("@", endpoint.RecordTypeA, "123.123.123.122"),
@@ -188,26 +255,6 @@ func TestAzureRecord(t *testing.T) {
 			createMockRecordSetWithTTL("nginx", endpoint.RecordTypeTXT, "heritage=external-dns,external-dns/owner=default", recordTTL),
 			createMockRecordSetWithTTL("hack", endpoint.RecordTypeCNAME, "hack.azurewebsites.net", 10),
 		},
-	}
-
-	rsResults := []dns.RecordSetListResult{
-		rslr,
-	}
-
-	mockRecordSetListResultPage := dns.NewRecordSetListResultPage(func(ctxParam context.Context, rslrParam dns.RecordSetListResult) (dns.RecordSetListResult, error) {
-		if len(rsResults) > 0 {
-			result := rsResults[0]
-			rsResults = nil
-			return result, nil
-		} else {
-			return dns.RecordSetListResult{}, nil
-		}
-	})
-
-	mockRecordSetListIterator := dns.NewRecordSetListResultIterator(mockRecordSetListResultPage)
-
-	recordSetsClient := mockRecordSetsClient{
-		mockRecordSetListIterator: &mockRecordSetListIterator,
 	}
 
 	provider := newAzureProvider(NewDomainFilter([]string{"example.com"}), NewZoneIDFilter([]string{""}), true, "k8s", &zonesClient, &recordSetsClient)
@@ -233,7 +280,7 @@ func TestAzureRecord(t *testing.T) {
 
 func TestAzureMultiRecord(t *testing.T) {
 	zonesClient := mockZonesClient{
-		mockZonesClientZoneList: []Zone{
+		zones: []Zone{
 			{
 				Name: "example.com",
 				Id:   "/dnszones/example.com",
@@ -242,8 +289,8 @@ func TestAzureMultiRecord(t *testing.T) {
 		},
 	}
 
-	rslr := dns.RecordSetListResult{
-		Value: &[]dns.RecordSet{
+	recordSetsClient := mockRecordSetsClient{
+		recordSets: []RecordSet{
 			createMockRecordSet("@", "NS", "ns1-03.azure-dns.com."),
 			createMockRecordSet("@", "SOA", "Email: azuredns-hostmaster.microsoft.com"),
 			createMockRecordSet("@", endpoint.RecordTypeA, "123.123.123.122", "234.234.234.233"),
@@ -252,26 +299,6 @@ func TestAzureMultiRecord(t *testing.T) {
 			createMockRecordSetWithTTL("nginx", endpoint.RecordTypeTXT, "heritage=external-dns,external-dns/owner=default", recordTTL),
 			createMockRecordSetWithTTL("hack", endpoint.RecordTypeCNAME, "hack.azurewebsites.net", 10),
 		},
-	}
-
-	rsResults := []dns.RecordSetListResult{
-		rslr,
-	}
-
-	mockRecordSetListResultPage := dns.NewRecordSetListResultPage(func(ctxParam context.Context, rslrParam dns.RecordSetListResult) (dns.RecordSetListResult, error) {
-		if len(rsResults) > 0 {
-			result := rsResults[0]
-			rsResults = nil
-			return result, nil
-		} else {
-			return dns.RecordSetListResult{}, nil
-		}
-	})
-
-	mockRecordSetListIterator := dns.NewRecordSetListResultIterator(mockRecordSetListResultPage)
-
-	recordSetsClient := mockRecordSetsClient{
-		mockRecordSetListIterator: &mockRecordSetListIterator,
 	}
 
 	provider := newAzureProvider(NewDomainFilter([]string{"example.com"}), NewZoneIDFilter([]string{""}), true, "k8s", &zonesClient, &recordSetsClient)
@@ -329,9 +356,9 @@ func TestAzureApplyChangesDryRun(t *testing.T) {
 	validateAzureEndpoints(t, recordsClient.updatedEndpoints, []*endpoint.Endpoint{})
 }
 
-func testAzureApplyChangesInternal(t *testing.T, dryRun bool, client PublicRecordSetsClient) {
+func testAzureApplyChangesInternal(t *testing.T, dryRun bool, client RecordSetsClient) {
 	zonesClient := mockZonesClient{
-		mockZonesClientZoneList: []Zone{
+		zones: []Zone{
 			{
 				Name: "example.com",
 				Id:   "/dnszones/example.com",
@@ -411,11 +438,9 @@ func TestAzureGetAccessToken(t *testing.T) {
 	}
 }
 
-func TestAzureValidateRecordSet(t *testing.T) {
-	provider := newAzureProvider(NewDomainFilter([]string{"example.com"}), NewZoneIDFilter([]string{""}), true, "k8s", nil, nil)
-
+func TestAzureConvertRecordSetToEndpoint(t *testing.T) {
 	recordSet := createMockRecordSet("bar", endpoint.RecordTypeA, "111.222.333.444")
-	actualEndpoint, err := provider.validateRecordSet("example.com", recordSet)
+	actualEndpoint, err := convertRecordSetToEndpoint("example.com", recordSet)
 	if err != nil {
 		t.Fatalf("error validating recordSet: %s", err.Error())
 	}
@@ -423,4 +448,85 @@ func TestAzureValidateRecordSet(t *testing.T) {
 	expectedEndpoint := endpoint.NewEndpoint("bar.example.com", endpoint.RecordTypeA, "111.222.333.444")
 
 	validateAzureEndpoints(t, []*endpoint.Endpoint{actualEndpoint}, []*endpoint.Endpoint{expectedEndpoint})
+}
+
+func TestAzureConvertAzureARecordSetToRecordSet(t *testing.T) {
+	recordSet := createMockAzureRecordSet("bar", endpoint.RecordTypeA, "111.222.333.444")
+	actualRecordSet := convertAzureRecordSetToRecordSet(recordSet)
+
+	expectedRecordSet := RecordSet{
+		Name: to.StringPtr("bar"),
+		Type: to.StringPtr(endpoint.RecordTypeA),
+		RecordSetProperties: &RecordSetProperties{
+			ARecords: &[]ARecord{
+				{
+					Ipv4Address: to.StringPtr("111.222.333.444"),
+				},
+			},
+		},
+	}
+
+	assert.True(t, compareRecordSets(actualRecordSet, &expectedRecordSet), "Records mismatch: %s vs. %s", (*actualRecordSet).toString(), (expectedRecordSet).toString())
+}
+
+func TestAzureConvertAzureAMultiRecordSetToRecordSet(t *testing.T) {
+	recordSet := createMockAzureRecordSet("bar", endpoint.RecordTypeA, "111.222.333.444", "222.333.444.555")
+	actualRecordSet := convertAzureRecordSetToRecordSet(recordSet)
+
+	expectedRecordSet := RecordSet{
+		Name: to.StringPtr("bar"),
+		Type: to.StringPtr(endpoint.RecordTypeA),
+		RecordSetProperties: &RecordSetProperties{
+			ARecords: &[]ARecord{
+				{
+					Ipv4Address: to.StringPtr("111.222.333.444"),
+				},
+				{
+					Ipv4Address: to.StringPtr("222.333.444.555"),
+				},
+			},
+		},
+	}
+
+	assert.True(t, compareRecordSets(actualRecordSet, &expectedRecordSet), "Records mismatch: %s vs. %s", (*actualRecordSet).toString(), (expectedRecordSet).toString())
+}
+
+func TestAzureConvertAzureCNameRecordSetToRecordSet(t *testing.T) {
+	recordSet := createMockAzureRecordSet("bar", endpoint.RecordTypeCNAME, "foo.example.com")
+	actualRecordSet := convertAzureRecordSetToRecordSet(recordSet)
+
+	expectedRecordSet := RecordSet{
+		Name: to.StringPtr("bar"),
+		Type: to.StringPtr(endpoint.RecordTypeA),
+		RecordSetProperties: &RecordSetProperties{
+			CnameRecord: &CnameRecord{
+				Cname: to.StringPtr("foo.example.com"),
+			},
+		},
+	}
+
+	assert.True(t, compareRecordSets(actualRecordSet, &expectedRecordSet), "Records mismatch: %s vs. %s", (*actualRecordSet).toString(), (expectedRecordSet).toString())
+}
+
+func TestAzureConvertAzureTxtRecordSetToRecordSet(t *testing.T) {
+	recordSet := createMockAzureRecordSet("bar", endpoint.RecordTypeTXT, "tag")
+	actualRecordSet := convertAzureRecordSetToRecordSet(recordSet)
+
+	expectedRecordSet := RecordSet{
+		Name: to.StringPtr("bar"),
+		Type: to.StringPtr(endpoint.RecordTypeTXT),
+		RecordSetProperties: &RecordSetProperties{
+			TxtRecords: &[]TxtRecord{
+				{
+					Value: to.StringSlicePtr([]string{"tag"}),
+				},
+			},
+		},
+	}
+
+	assert.True(t, compareRecordSets(actualRecordSet, &expectedRecordSet), "Records mismatch: %s vs. %s", (*actualRecordSet).toString(), (expectedRecordSet).toString())
+}
+
+func compareRecordSets(actual *RecordSet, expected *RecordSet) bool {
+	return (*actual).toString() == (*expected).toString()
 }

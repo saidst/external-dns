@@ -17,9 +17,11 @@ limitations under the License.
 package provider
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
+	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -39,49 +41,6 @@ import (
 const (
 	azureRecordTTL = 300
 )
-
-type config struct {
-	Cloud                       string `json:"cloud" yaml:"cloud"`
-	TenantID                    string `json:"tenantId" yaml:"tenantId"`
-	SubscriptionID              string `json:"subscriptionId" yaml:"subscriptionId"`
-	ResourceGroup               string `json:"resourceGroup" yaml:"resourceGroup"`
-	Location                    string `json:"location" yaml:"location"`
-	ClientID                    string `json:"aadClientId" yaml:"aadClientId"`
-	ClientSecret                string `json:"aadClientSecret" yaml:"aadClientSecret"`
-	UseManagedIdentityExtension bool   `json:"useManagedIdentityExtension" yaml:"useManagedIdentityExtension"`
-}
-
-// create general structs and interfaces to decouple from particular types of Azure DNS and Azure Private DNS
-type Zone struct {
-	Name string
-	Id   string
-	Type string
-}
-
-type ZonesClient interface {
-	ListByResourceGroupComplete(ctx context.Context, resourceGroupName string) ([]Zone, error)
-}
-
-type PublicZonesClient struct {
-	*dns.ZonesClient
-}
-
-// PublicRecordSetsClient is an interface of dns.PublicRecordSetsClient that can be stubbed for testing.
-type PublicRecordSetsClient interface {
-	ListAllByDNSZoneComplete(ctx context.Context, resourceGroupName string, zoneName string, top *int32, recordSetNameSuffix string) (result dns.RecordSetListResultIterator, err error)
-	Delete(ctx context.Context, resourceGroupName string, zoneName string, relativeRecordSetName string, recordType dns.RecordType, ifMatch string) (result autorest.Response, err error)
-	CreateOrUpdate(ctx context.Context, resourceGroupName string, zoneName string, relativeRecordSetName string, recordType dns.RecordType, parameters dns.RecordSet, ifMatch string, ifNoneMatch string) (result dns.RecordSet, err error)
-}
-
-// AzureProvider implements the DNS provider for Microsoft's Azure cloud platform.
-type AzureProvider struct {
-	domainFilter           DomainFilter
-	zoneIDFilter           ZoneIDFilter
-	dryRun                 bool
-	resourceGroup          string
-	publicZonesClient      ZonesClient
-	publicRecordSetsClient PublicRecordSetsClient
-}
 
 // NewAzureProvider creates a new Azure provider.
 //
@@ -124,6 +83,7 @@ func NewAzureProvider(configFile string, domainFilter DomainFilter, zoneIDFilter
 
 	recordSetsClient := dns.NewRecordSetsClientWithBaseURI(environment.ResourceManagerEndpoint, cfg.SubscriptionID)
 	recordSetsClient.Authorizer = autorest.NewBearerAuthorizer(token)
+	publicRecordSetsClient := PublicRecordSetsClient{&recordSetsClient}
 
 	// Private DNS
 	//privateZonesClient := privatedns.NewPrivateZonesClientWithBaseURI(environment.ResourceManagerEndpoint, cfg.SubscriptionID)
@@ -134,59 +94,33 @@ func NewAzureProvider(configFile string, domainFilter DomainFilter, zoneIDFilter
 		dryRun:                 dryRun,
 		resourceGroup:          cfg.ResourceGroup,
 		publicZonesClient:      publicZonesClient,
-		publicRecordSetsClient: recordSetsClient,
+		publicRecordSetsClient: publicRecordSetsClient,
 	}
 	return provider, nil
 }
 
-// getAccessToken retrieves Azure API access token.
-func getAccessToken(cfg config, environment azure.Environment) (*adal.ServicePrincipalToken, error) {
-	// Try to retrive token with MSI.
-	if cfg.UseManagedIdentityExtension {
-		log.Info("Using managed identity extension to retrieve access token for Azure API.")
-		msiEndpoint, err := adal.GetMSIVMEndpoint()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get the managed service identity endpoint: %v", err)
-		}
-
-		token, err := adal.NewServicePrincipalTokenFromMSI(msiEndpoint, environment.ServiceManagementEndpoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create the managed service identity token: %v", err)
-		}
-		return token, nil
-	}
-
-	// Try to retrieve token with service principal credentials.
-	if len(cfg.ClientID) > 0 && len(cfg.ClientSecret) > 0 {
-		log.Info("Using client_id+client_secret to retrieve access token for Azure API.")
-		oauthConfig, err := adal.NewOAuthConfig(environment.ActiveDirectoryEndpoint, cfg.TenantID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve OAuth config: %v", err)
-		}
-
-		token, err := adal.NewServicePrincipalToken(*oauthConfig, cfg.ClientID, cfg.ClientSecret, environment.ResourceManagerEndpoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create service principal token: %v", err)
-		}
-		return token, nil
-	}
-
-	return nil, fmt.Errorf("no credentials provided for Azure API")
-}
+//
+// Functions implemented in order to comply to provider-interface
+//
 
 // Records gets the current records.
 //
 // Returns the current records or an error if the operation failed.
 func (p *AzureProvider) Records() (endpoints []*endpoint.Endpoint, _ error) {
 	ctx := context.Background()
-	zones, err := p.readZones(ctx)
+
+	// various dns-zones might exist in a rg
+	// we discover all of them
+	zones, err := p.getZones(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// zone by zone, all records of a zone are discovered
+	// and after matching with the zone filter added to an overarching collection
 	discoveredEndpoints := []*endpoint.Endpoint{}
 	for _, zone := range zones {
-		zoneEndpoints, err := p.getRecordsByZoneName(ctx, zone.Name)
+		zoneEndpoints, err := p.getEndpointsByZone(ctx, zone)
 		discoveredEndpoints = append(discoveredEndpoints, zoneEndpoints...)
 		if err != nil {
 			return nil, err
@@ -199,7 +133,7 @@ func (p *AzureProvider) Records() (endpoints []*endpoint.Endpoint, _ error) {
 //
 // Returns nil if the operation was successful or an error if the operation failed.
 func (p *AzureProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	zones, err := p.readZones(ctx)
+	zones, err := p.getZones(ctx)
 	if err != nil {
 		return err
 	}
@@ -210,40 +144,11 @@ func (p *AzureProvider) ApplyChanges(ctx context.Context, changes *plan.Changes)
 	return nil
 }
 
-func (p PublicZonesClient) ListByResourceGroupComplete(ctx context.Context, resourceGroupName string) ([]Zone, error) {
-	log.Debugf("Retrieving Azure DNS Zones for rg: %s.", resourceGroupName)
+//
+// Other functions
+//
 
-	var zones []Zone
-
-	// public zones
-	i, err := p.ZonesClient.ListByResourceGroupComplete(ctx, resourceGroupName, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	err = i.NextWithContext(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	for i.NotDone() {
-		zones = append(zones, Zone{
-			Id:   *i.Value().ID,
-			Name: *i.Value().Name,
-			Type: "public",
-		})
-
-		err := i.NextWithContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return zones, nil
-}
-
-func (p *AzureProvider) readZones(ctx context.Context) ([]Zone, error) {
+func (p *AzureProvider) getZones(ctx context.Context) ([]Zone, error) {
 	log.Debugf("Retrieving public and private DNS Zones for RG: %s.", p.resourceGroup)
 
 	var validatedZones []Zone
@@ -276,32 +181,83 @@ func (p *AzureProvider) readZones(ctx context.Context) ([]Zone, error) {
 	return validatedZones, nil
 }
 
-// getRecordsByZoneName returns all records for the specified zoneName.
-func (p *AzureProvider) getRecordsByZoneName(ctx context.Context, zoneName string) ([]*endpoint.Endpoint, error) {
-	log.Debugf("Retrieving Azure DNS records for zone '%s'.", zoneName)
+// getEndpointsByZone returns all records for the specified zoneName.
+func (p *AzureProvider) getEndpointsByZone(ctx context.Context, zone Zone) ([]*endpoint.Endpoint, error) {
+	log.Debugf("Retrieving Azure DNS records for zone '%s'.", zone.Name)
 
-	i, err := p.publicRecordSetsClient.ListAllByDNSZoneComplete(ctx, p.resourceGroup, zoneName, nil, "")
+	var recordSets []RecordSet
+	var err error
+	var endpoints = []*endpoint.Endpoint{}
 
+	// depening zone type use different client
+	if zone.Type == "public" {
+		recordSets, err = p.publicRecordSetsClient.GetRecordsByZoneName(ctx, p.resourceGroup, zone.Name)
+	} else {
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	for _, recordSet := range recordSets {
+		// errors during extraction are logged
+		// but do not stop the entire application
+		ep, _ := convertRecordSetToEndpoint(zone.Name, recordSet)
+
+		if ep != nil {
+			endpoints = append(endpoints, ep)
+		}
+	}
+
+	return endpoints, nil
+}
+
+func (p PublicZonesClient) ListByResourceGroupComplete(ctx context.Context, resourceGroupName string) ([]Zone, error) {
+	log.Debugf("Retrieving public Azure DNS Zones for rg: %s.", resourceGroupName)
+
+	var zones []Zone
+
+	// public zones
+	i, err := p.ZonesClient.ListByResourceGroupComplete(ctx, resourceGroupName, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	err = i.NextWithContext(ctx)
+
 	if err != nil {
 		return nil, err
 	}
 
-	endpoints := []*endpoint.Endpoint{}
-
 	for i.NotDone() {
-		// validation of a record has been moved to a separate function
-		ep, err := p.validateRecordSet(zoneName, i.Value())
+		zones = append(zones, Zone{
+			Id:   *i.Value().ID,
+			Name: *i.Value().Name,
+			Type: "public",
+		})
+
+		err := i.NextWithContext(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if ep != nil {
-			endpoints = append(endpoints, ep)
-		}
+	}
+
+	return zones, nil
+}
+
+func (p PublicRecordSetsClient) GetRecordsByZoneName(ctx context.Context, resourceGroupName string, zoneName string) ([]RecordSet, error) {
+	log.Debugf("Retrieving public records for zone '%s'.", zoneName)
+
+	i, err := p.RecordSetsClient.ListAllByDNSZoneComplete(ctx, resourceGroupName, zoneName, nil, "")
+	if err != nil {
+		return nil, err
+	}
+
+	recordSets := []RecordSet{}
+
+	for i.NotDone() {
+		recordSet := convertAzureRecordSetToRecordSet(i.Value())
+
+		recordSets = append(recordSets, *recordSet)
 
 		err = i.NextWithContext(ctx)
 		if err != nil {
@@ -309,43 +265,8 @@ func (p *AzureProvider) getRecordsByZoneName(ctx context.Context, zoneName strin
 		}
 	}
 
-	return endpoints, nil
+	return recordSets, nil
 }
-
-// validateRecordSet is a callback-function used to filter out records according to defined criteria.
-func (p *AzureProvider) validateRecordSet(zoneName string, recordSet dns.RecordSet) (*endpoint.Endpoint, error) {
-	if recordSet.Name == nil || recordSet.Type == nil {
-		err := fmt.Errorf("Skipping invalid record set with nil name or type.")
-		return nil, err
-	}
-	recordType := strings.TrimLeft(*recordSet.Type, "Microsoft.Network/dnszones/")
-	if !supportedRecordType(recordType) {
-		return nil, nil
-	}
-	name := formatAzureDNSName(*recordSet.Name, zoneName)
-	targets := extractAzureTargets(&recordSet)
-	if len(targets) == 0 {
-		err := fmt.Errorf("Failed to extract targets for '%s' with type '%s'.", name, recordType)
-		return nil, err
-	}
-
-	// all criteria has been passed
-	var ttl endpoint.TTL
-	if recordSet.TTL != nil {
-		ttl = endpoint.TTL(*recordSet.TTL)
-	}
-	ep := endpoint.NewEndpointWithTTL(name, recordType, endpoint.TTL(ttl), targets...)
-	log.Debugf(
-		"Found %s record for '%s' with target '%s'.",
-		ep.RecordType,
-		ep.DNSName,
-		ep.Targets,
-	)
-
-	return ep, nil
-}
-
-type azureChangeMap map[string][]*endpoint.Endpoint
 
 func (p *AzureProvider) mapChanges(zones []Zone, changes *plan.Changes) (azureChangeMap, azureChangeMap) {
 	ignored := map[string]bool{}
@@ -434,7 +355,7 @@ func (p *AzureProvider) updateRecords(ctx context.Context, updated azureChangeMa
 				zone,
 			)
 
-			recordSet, err := p.newRecordSet(endpoint)
+			recordSet, err := convertEndpointToRecordSet(endpoint)
 			if err == nil {
 				_, err = p.publicRecordSetsClient.CreateOrUpdate(
 					ctx,
@@ -474,7 +395,89 @@ func (p *AzureProvider) recordSetNameForZone(zone string, endpoint *endpoint.End
 	return name
 }
 
-func (p *AzureProvider) newRecordSet(endpoint *endpoint.Endpoint) (dns.RecordSet, error) {
+// Shared functions
+
+func convertAzureRecordSetToRecordSet(azureRecordSet dns.RecordSet) *RecordSet {
+	recordSetProperties := RecordSetProperties{}
+
+	if azureRecordSet.TTL != nil {
+		recordSetProperties.TTL = azureRecordSet.TTL
+	}
+
+	// A-Records
+	if azureRecordSet.ARecords != nil {
+		recordSetProperties.ARecords = &[]ARecord{}
+		for _, azureARecord := range *azureRecordSet.ARecords {
+			*recordSetProperties.ARecords = append(*recordSetProperties.ARecords, ARecord{
+				Ipv4Address: azureARecord.Ipv4Address,
+			})
+		}
+	}
+
+	// CNAME
+	if azureRecordSet.CnameRecord != nil {
+		recordSetProperties.CnameRecord = &CnameRecord{
+			Cname: azureRecordSet.CnameRecord.Cname,
+		}
+	}
+
+	// Txt-Records
+	if azureRecordSet.TxtRecords != nil {
+		for _, azureTxtRecord := range *azureRecordSet.TxtRecords {
+			recordSetProperties.TxtRecords = &[]TxtRecord{}
+			*recordSetProperties.TxtRecords = append(*recordSetProperties.TxtRecords, TxtRecord{
+				Value: azureTxtRecord.Value,
+			})
+		}
+	}
+
+	recordSet := RecordSet{
+		Name:                azureRecordSet.Name,
+		Type:                azureRecordSet.Type,
+		RecordSetProperties: &recordSetProperties,
+	}
+
+	return &recordSet
+}
+
+// convertRecordSetToEndpoint is used to convert between external-dns-domain model and interlayer
+// also, it filters out invalid records according to defined criteria.
+func convertRecordSetToEndpoint(zoneName string, recordSet RecordSet) (*endpoint.Endpoint, error) {
+	if recordSet.Name == nil || recordSet.Type == nil {
+		err := fmt.Errorf("Skipping invalid record set with nil name or type.")
+		return nil, err
+	}
+
+	recordType := strings.TrimLeft(*recordSet.Type, "Microsoft.Network/dnszones/")
+	if !supportedRecordType(recordType) {
+		return nil, nil
+	}
+
+	name := formatAzureDNSName(*recordSet.Name, zoneName)
+
+	targets := extractAzureTargetsFromRecordSet(&recordSet)
+	if len(targets) == 0 {
+		err := fmt.Errorf("Failed to extract targets for '%s' with type '%s'.", name, recordType)
+		return nil, err
+	}
+
+	var ttl endpoint.TTL
+	if recordSet.TTL != nil {
+		ttl = endpoint.TTL(*recordSet.TTL)
+	}
+
+	ep := endpoint.NewEndpointWithTTL(name, recordType, endpoint.TTL(ttl), targets...)
+	log.Debugf(
+		"Found %s record for '%s' with target '%s'.",
+		ep.RecordType,
+		ep.DNSName,
+		ep.Targets,
+	)
+
+	return ep, nil
+}
+
+func convertEndpointToRecordSet(endpoint *endpoint.Endpoint) (dns.RecordSet, error) {
 	var ttl int64 = azureRecordTTL
 	if endpoint.RecordTTL.IsConfigured() {
 		ttl = int64(endpoint.RecordTTL)
@@ -519,7 +522,6 @@ func (p *AzureProvider) newRecordSet(endpoint *endpoint.Endpoint) (dns.RecordSet
 	return dns.RecordSet{}, fmt.Errorf("unsupported record type '%s'", endpoint.RecordType)
 }
 
-// Helper function (shared with test code)
 func formatAzureDNSName(recordName, zoneName string) string {
 	if recordName == "@" {
 		return zoneName
@@ -527,8 +529,7 @@ func formatAzureDNSName(recordName, zoneName string) string {
 	return fmt.Sprintf("%s.%s", recordName, zoneName)
 }
 
-// Helper function (shared with text code)
-func extractAzureTargets(recordSet *dns.RecordSet) []string {
+func extractAzureTargetsFromRecordSet(recordSet *RecordSet) []string {
 	properties := recordSet.RecordSetProperties
 	if properties == nil {
 		return []string{}
@@ -559,4 +560,115 @@ func extractAzureTargets(recordSet *dns.RecordSet) []string {
 		}
 	}
 	return []string{}
+}
+
+func extractAzureTargetsFromAzureRecordSet(recordSet *dns.RecordSet) []string {
+	properties := recordSet.RecordSetProperties
+	if properties == nil {
+		return []string{}
+	}
+
+	// Check for A records
+	aRecords := properties.ARecords
+	if aRecords != nil && len(*aRecords) > 0 && (*aRecords)[0].Ipv4Address != nil {
+		targets := make([]string, len(*aRecords))
+		for i, aRecord := range *aRecords {
+			targets[i] = *aRecord.Ipv4Address
+		}
+		return targets
+	}
+
+	// Check for CNAME records
+	cnameRecord := properties.CnameRecord
+	if cnameRecord != nil && cnameRecord.Cname != nil {
+		return []string{*cnameRecord.Cname}
+	}
+
+	// Check for TXT records
+	txtRecords := properties.TxtRecords
+	if txtRecords != nil && len(*txtRecords) > 0 && (*txtRecords)[0].Value != nil {
+		values := (*txtRecords)[0].Value
+		if values != nil && len(*values) > 0 {
+			return []string{(*values)[0]}
+		}
+	}
+	return []string{}
+}
+
+// getAccessToken retrieves Azure API access token.
+func getAccessToken(cfg config, environment azure.Environment) (*adal.ServicePrincipalToken, error) {
+	// Try to retrive token with MSI.
+	if cfg.UseManagedIdentityExtension {
+		log.Info("Using managed identity extension to retrieve access token for Azure API.")
+		msiEndpoint, err := adal.GetMSIVMEndpoint()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get the managed service identity endpoint: %v", err)
+		}
+
+		token, err := adal.NewServicePrincipalTokenFromMSI(msiEndpoint, environment.ServiceManagementEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create the managed service identity token: %v", err)
+		}
+		return token, nil
+	}
+
+	// Try to retrieve token with service principal credentials.
+	if len(cfg.ClientID) > 0 && len(cfg.ClientSecret) > 0 {
+		log.Info("Using client_id+client_secret to retrieve access token for Azure API.")
+		oauthConfig, err := adal.NewOAuthConfig(environment.ActiveDirectoryEndpoint, cfg.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve OAuth config: %v", err)
+		}
+
+		token, err := adal.NewServicePrincipalToken(*oauthConfig, cfg.ClientID, cfg.ClientSecret, environment.ResourceManagerEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create service principal token: %v", err)
+		}
+		return token, nil
+	}
+
+	return nil, fmt.Errorf("no credentials provided for Azure API")
+}
+
+func (r RecordSet) toString() string {
+	var buffer bytes.Buffer
+
+	buffer.WriteString(fmt.Sprintf("%s, %s", *r.Name, (*r.RecordSetProperties).toString()))
+
+	return buffer.String()
+
+}
+
+func (p RecordSetProperties) toString() string {
+	var buffer bytes.Buffer
+
+	// A-Records
+	if p.ARecords != nil && len(*p.ARecords) > 0 {
+		buffer.WriteString(fmt.Sprintf("A-Records: "))
+		sort.SliceStable(*p.ARecords, func(i, j int) bool {
+			return *(*p.ARecords)[i].Ipv4Address > *(*p.ARecords)[j].Ipv4Address
+		})
+		for _, aRecord := range *p.ARecords {
+			buffer.WriteString(fmt.Sprintf("%s", *aRecord.Ipv4Address))
+		}
+	}
+
+	// CName
+	if p.CnameRecord != nil {
+		buffer.WriteString(fmt.Sprintf("CName: %s", *p.CnameRecord.Cname))
+	}
+
+	// Txt-Records
+	if p.TxtRecords != nil && len(*p.TxtRecords) > 0 {
+		buffer.WriteString(fmt.Sprintf("Txt-Records: "))
+		sort.SliceStable(*p.TxtRecords, func(i, j int) bool {
+			return strings.Join(*(*p.TxtRecords)[i].Value, "") > strings.Join(*(*p.TxtRecords)[j].Value, "")
+		})
+		for _, txtRecord := range *p.TxtRecords {
+			buffer.WriteString(fmt.Sprintf("%s", *txtRecord.Value))
+		}
+	}
+
+	return buffer.String()
+
 }
