@@ -89,7 +89,7 @@ func (p *AzurePrivateDNSProvider) Records() (endpoints []*endpoint.Endpoint, _ e
 		err := p.iterateRecords(ctx, *zone.Name, func(recordSet privatedns.RecordSet) {
 			var recordType string
 			if recordSet.Type == nil {
-				log.Debug("Skipping invalid record set with missing type.")
+				log.Debugf("Skipping invalid record set with missing type.")
 				return
 			} else {
 				recordType = strings.TrimLeft(*recordSet.Type, "Microsoft.Network/privateDnsZones")
@@ -97,7 +97,7 @@ func (p *AzurePrivateDNSProvider) Records() (endpoints []*endpoint.Endpoint, _ e
 
 			var name string
 			if recordSet.Name == nil {
-				log.Debug("Skipping invalid record set with missing name.")
+				log.Debugf("Skipping invalid record set with missing name.")
 				return
 			} else {
 				name = formatAzureDNSName(*recordSet.Name, *zone.Name)
@@ -105,7 +105,7 @@ func (p *AzurePrivateDNSProvider) Records() (endpoints []*endpoint.Endpoint, _ e
 
 			targets := extractAzurePrivateDNSTargets(&recordSet)
 			if len(targets) == 0 {
-				log.Debug("Failed to extract targets for '%s' with type '%s'.", name, recordType)
+				log.Debugf("Failed to extract targets for '%s' with type '%s'.", name, recordType)
 				return
 			}
 
