@@ -1,8 +1,8 @@
 
-# Set up External-DNS for Azure Private DNS
+# Set up ExternalDNS for Azure Private DNS
 
-This tutorial describes how to setup External-DNS for managing records in Azure Private DNS.  
-It assumes to deploy External-DNS as a container Kubernetes.
+This tutorial describes how to setup ExternalDNS for managing records in Azure Private DNS.  
+It assumes to deploy ExternalDNS as a container Kubernetes.
 
 >Note: With Azure Private DNS we refer to the successor of the private-zone functionality in Azure DNS, which is 
 a separate, independent product.
@@ -11,7 +11,7 @@ a separate, independent product.
 It comprises of the following steps:
 1) Provision Azure Private DNS
 2) Configure service principal for managing the zone
-3) Deploy External-DNS  
+3) Deploy ExternalDNS  
 
 ## Prerequisites
 - Azure Kubernetes Service available
@@ -38,7 +38,7 @@ Thus, first create a VNET.
 ```
 $ az network vnet create \
   --name myvnet \
-  --resource-group external-dns \
+  --resource-group externaldns \
   --location westeurope \
   --address-prefix 10.2.0.0/16 \
   --subnet-name mysubnet \
@@ -48,7 +48,7 @@ $ az network vnet create \
 Next, create a Azure Private DNS zone for "example.com":
 
 ```
-$ az network private-dns zone create -g external-dns -n example.com
+$ az network private-dns zone create -g externaldns -n example.com
 ```
 
 Substitute a domain you own for "example.com" if desired.
@@ -56,20 +56,20 @@ Substitute a domain you own for "example.com" if desired.
 Finally, create the mentioned link with the VNET.
 
 ```
-$ az network private-dns link vnet create -g external-dns -n mylink \
+$ az network private-dns link vnet create -g externaldns -n mylink \
    -z example.com -v myvnet
 ```
 
 ## Configure service principal for managing the zone
-External-DNS needs permissions to make changes in Azure Private DNS.  
-These permissions are roles assigned to the service principal used by External-DNS.
+ExternalDNS needs permissions to make changes in Azure Private DNS.  
+These permissions are roles assigned to the service principal used by ExternalDNS.
 
 A service principal with a minimum access level of `contributor` to the Private DNS zone(s) and `reader` to the resource group containing the Azure Private DNS zone(s) is necessary.
 More powerful role-assignments like `owner` or assignments on subscription-level work too. 
 
 Start off by **creating the service principal** without role-assignments.
 ```
-$ az ad sp create-for-rbac -n external-dns-sp
+$ az ad sp create-for-rbac -n externaldns-sp
 {
   "appId": "appId GUID",  <-- aadClientId value
   ...
@@ -85,15 +85,15 @@ But first **retrieve the ID's** of the objects to assign roles on.
 
 ```
 # find out the resource ids of the resource group where the dns zone is deployed, and the dns zone itself
-$ az group show --name external-dns
+$ az group show --name externaldns
 {
-  "id": "/subscriptions/id/resourceGroups/external-dns",
+  "id": "/subscriptions/id/resourceGroups/externaldns",
   ...
 }
 
-$ az network private-dns zone show --name example.com -g external-dns
+$ az network private-dns zone show --name example.com -g externaldns
 {
-  "id": "/subscriptions/.../resourceGroups/external-dns/providers/Microsoft.Network/privateDnsZones/example.com",
+  "id": "/subscriptions/.../resourceGroups/externaldns/providers/Microsoft.Network/privateDnsZones/example.com",
   ...
 }
 ```
@@ -106,7 +106,7 @@ $ az role assignment create --role "Reader" --assignee <appId GUID> --scope <res
 $ az role assignment create --role "Contributor" --assignee <appId GUID> --scope <dns zone resource id>  
 ```
 
-## Deploy External-DNS
+## Deploy ExternalDNS
 Configure `kubectl` to be able to communicate and authenticate with your cluster.   
 This is per default done through the file `~/.kube/config`.
 
@@ -115,7 +115,7 @@ Azure-CLI features functionality for automatically maintaining this file for AKS
 
 Then apply one of the following manifests depending on whether you use RBAC or not.
 
-The credentials of the service principal are provided to External-DNS as environment-variables.   
+The credentials of the service principal are provided to ExternalDNS as environment-variables.   
 At the end of this section, we additionaly describe how to provide them as a _file_.
 
 ### Manifest (for clusters without RBAC enabled)
@@ -123,24 +123,24 @@ At the end of this section, we additionaly describe how to provide them as a _fi
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: external-dns
+  name: externaldns
 spec:
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: external-dns
+        app: externaldns
     spec:
       containers:
-      - name: external-dns
+      - name: externaldns
         image: registry.opensource.zalan.do/teapot/external-dns:latest
         args:
         - --source=service
         - --source=ingress
         - --domain-filter=example.com
         - --provider=azure-private-dns
-        - --azure-resource-group=external-dns
+        - --azure-resource-group=externaldns
         - --azure-subscription-id=<use the id of your subscription>
         env:
         - name: AZURE_TENANT_ID
@@ -156,12 +156,12 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: external-dns
+  name: externaldns
 ---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRole
 metadata:
-  name: external-dns
+  name: externaldns
 rules:
 - apiGroups: [""]
   resources: ["services"]
@@ -179,38 +179,38 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRoleBinding
 metadata:
-  name: external-dns-viewer
+  name: externaldns-viewer
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: external-dns
+  name: externaldns
 subjects:
 - kind: ServiceAccount
-  name: external-dns
+  name: externaldns
   namespace: default
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: external-dns
+  name: externaldns
 spec:
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: external-dns
+        app: externaldns
     spec:
-      serviceAccountName: external-dns
+      serviceAccountName: externaldns
       containers:
-      - name: external-dns
+      - name: externaldns
         image: registry.opensource.zalan.do/teapot/external-dns:latest
         args:
         - --source=service
         - --source=ingress
         - --domain-filter=example.com
         - --provider=azure-private-dns
-        - --azure-resource-group=external-dns
+        - --azure-resource-group=externaldns
         - --azure-subscription-id=<use the id of your subscription>
         env:
         - name: AZURE_TENANT_ID
@@ -230,12 +230,12 @@ services with type `NodePort` will be skipped!
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: external-dns
+  name: externaldns
 ---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: Role
 metadata:
-  name: external-dns
+  name: externaldns
 rules:
 - apiGroups: [""]
   resources: ["services"]
@@ -250,37 +250,37 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: RoleBinding
 metadata:
-  name: external-dns
+  name: externaldns
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: external-dns
+  name: externaldns
 subjects:
 - kind: ServiceAccount
-  name: external-dns
+  name: externaldns
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: external-dns
+  name: externaldns
 spec:
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: external-dns
+        app: externaldns
     spec:
-      serviceAccountName: external-dns
+      serviceAccountName: externaldns
       containers:
-      - name: external-dns
+      - name: externaldns
         image: registry.opensource.zalan.do/teapot/external-dns:latest
         args:
         - --source=service
         - --source=ingress
         - --domain-filter=example.com
         - --provider=azure-private-dns
-        - --azure-resource-group=external-dns
+        - --azure-resource-group=externaldns
         - --azure-subscription-id=<use the id of your subscription>
         env:
         - name: AZURE_TENANT_ID
@@ -291,7 +291,7 @@ spec:
           value: "<use the aadClientSecret discovered during creation of service principal>"
 ```
 
-Create the deployment for External-DNS:
+Create the deployment for ExternalDNS:
 
 ```
 $ kubectl create -f externaldns.yaml
@@ -349,7 +349,7 @@ spec:
         path: /
 ```
 
-When using external-dns with ingress objects it will automatically create DNS records based on host names specified in ingress objects that match the domain-filter argument in the external-dns deployment manifest. When those host names are removed or renamed the corresponding DNS records are also altered.
+When using ExternalDNS with ingress objects it will automatically create DNS records based on host names specified in ingress objects that match the domain-filter argument in the externaldns deployment manifest. When those host names are removed or renamed the corresponding DNS records are also altered.
 
 Create the deployment, service and ingress object:
 
@@ -364,7 +364,7 @@ Since your external IP would have already been assigned to the nginx-ingress ser
 Run the following command to view the A records for your Azure Private DNS zone:
 
 ```
-$ az network private-dns record-set a list -g external-dns -z example.com
+$ az network private-dns record-set a list -g externaldns -z example.com
 ```
 
 Substitute the zone for the one created above if a different domain was used.
